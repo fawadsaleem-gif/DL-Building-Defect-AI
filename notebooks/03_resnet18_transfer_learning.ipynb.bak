@@ -1,0 +1,151 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "47050a02",
+   "metadata": {},
+   "source": [
+    "# Building Defect AI — Notebook workflow\n",
+    "\n",
+    "Run from the repository root. Expected data layout: `dataset/BD3_split/{train,val,test}/<class_name>/...`.\n",
+    "\n",
+    "**Task:** classify images into the seven BD3 labels. This notebook records the method, why it is used, the result and its interpretation. Do not treat model predictions as professional inspection findings."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "5baf7ba8",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from pathlib import Path\n",
+    "import torch\n",
+    "from torchvision import datasets, models\n",
+    "ROOT = Path.cwd()\n",
+    "DATA = ROOT / \"dataset\" / \"BD3_split\"\n",
+    "DEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(\"Project:\", ROOT)\n",
+    "print(\"Device:\", DEVICE)\n",
+    "assert DATA.exists(), f\"Dataset folder not found: {DATA}. Run from the project root and add the dataset.\"\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "476eac93",
+   "metadata": {},
+   "source": [
+    "## 1. Transfer learning setup\n",
+    "\n",
+    "ResNet18 is a convolutional neural network pretrained on ImageNet. We replace its final fully connected layer with a seven-class classifier. First train only the new classifier; then selectively unfreeze deeper layers. This compares adaptation capacity against overfitting risk.\n",
+    "\n",
+    "This notebook provides a reproducible training baseline. The recorded project experiments remain in `original_scripts/`; do not overwrite the published Experiment 3 checkpoint until a new run has been validated."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "44295964",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import copy\n",
+    "import torch.nn as nn\n",
+    "from torch.utils.data import DataLoader\n",
+    "weights = models.ResNet18_Weights.DEFAULT\n",
+    "tfm = weights.transforms()\n",
+    "train_ds = datasets.ImageFolder(DATA / \"train\", transform=tfm)\n",
+    "val_ds = datasets.ImageFolder(DATA / \"val\", transform=tfm)\n",
+    "assert train_ds.classes == val_ds.classes\n",
+    "train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)\n",
+    "val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=0)\n",
+    "model = models.resnet18(weights=weights)\n",
+    "model.fc = nn.Linear(model.fc.in_features, len(train_ds.classes))\n",
+    "for p in model.parameters(): p.requires_grad = False\n",
+    "for p in model.fc.parameters(): p.requires_grad = True\n",
+    "model = model.to(DEVICE)\n",
+    "criterion = nn.CrossEntropyLoss()\n",
+    "optimizer = torch.optim.Adam(model.fc.parameters(), lr=1e-3)\n",
+    "print(\"Trainable parameters:\", sum(p.numel() for p in model.parameters() if p.requires_grad))\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "aa9d60e6",
+   "metadata": {},
+   "source": [
+    "## 2. Train classifier head\n",
+    "\n",
+    "Cross entropy is the standard objective for mutually exclusive classes. Adam updates the trainable classifier weights. Validation loss is monitored separately because training accuracy alone cannot detect overfitting."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "cd13acb4",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def run_epoch(model, loader, optimizer=None):\n",
+    "    training = optimizer is not None\n",
+    "    model.train(training)\n",
+    "    total_loss = total = correct = 0\n",
+    "    for x, y in loader:\n",
+    "        x, y = x.to(DEVICE), y.to(DEVICE)\n",
+    "        if optimizer: optimizer.zero_grad()\n",
+    "        with torch.set_grad_enabled(training):\n",
+    "            logits = model(x)\n",
+    "            loss = criterion(logits, y)\n",
+    "            if optimizer:\n",
+    "                loss.backward(); optimizer.step()\n",
+    "        total_loss += loss.item() * y.size(0)\n",
+    "        correct += (logits.argmax(1) == y).sum().item()\n",
+    "        total += y.size(0)\n",
+    "    return total_loss / total, correct / total\n",
+    "\n",
+    "history = []\n",
+    "best_loss = float(\"inf\"); best_state = copy.deepcopy(model.state_dict())\n",
+    "for epoch in range(5):\n",
+    "    tr_loss, tr_acc = run_epoch(model, train_loader, optimizer)\n",
+    "    va_loss, va_acc = run_epoch(model, val_loader)\n",
+    "    history.append((tr_loss, tr_acc, va_loss, va_acc))\n",
+    "    if va_loss < best_loss:\n",
+    "        best_loss = va_loss; best_state = copy.deepcopy(model.state_dict())\n",
+    "    print(f\"Epoch {epoch+1}: train loss {tr_loss:.4f}, acc {tr_acc:.3f} | val loss {va_loss:.4f}, acc {va_acc:.3f}\")\n",
+    "model.load_state_dict(best_state)\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "78b2b4e2",
+   "metadata": {},
+   "source": [
+    "## 3. Plot learning curves and reflect\n",
+    "\n",
+    "A widening gap between training and validation performance can indicate overfitting. The project comparison found that unfreezing too many layers (Layer3 + Layer4 + classifier) produced a 79.75% test result, below the frozen-head baseline (83.14%). The more constrained Layer4 + classifier Experiment 3 was selected as the candidate, with final test metrics to be independently re-evaluated."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "75f57941",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "epochs = range(1, len(history)+1)\n",
+    "plt.plot(epochs, [r[1] for r in history], marker=\"o\", label=\"train accuracy\")\n",
+    "plt.plot(epochs, [r[3] for r in history], marker=\"o\", label=\"validation accuracy\")\n",
+    "plt.xlabel(\"Epoch\"); plt.ylabel(\"Accuracy\"); plt.title(\"Learning curves\"); plt.legend(); plt.show()\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

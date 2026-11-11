@@ -1,0 +1,109 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "fe2f177f",
+   "metadata": {},
+   "source": [
+    "# Building Defect AI — Notebook workflow\n",
+    "\n",
+    "Run from the repository root. Expected data layout: `dataset/BD3_split/{train,val,test}/<class_name>/...`.\n",
+    "\n",
+    "**Task:** classify images into the seven BD3 labels. This notebook records the method, why it is used, the result and its interpretation. Do not treat model predictions as professional inspection findings."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "58060e5c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from pathlib import Path\n",
+    "import torch\n",
+    "from torchvision import datasets, models\n",
+    "ROOT = Path.cwd()\n",
+    "DATA = ROOT / \"dataset\" / \"BD3_split\"\n",
+    "DEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(\"Project:\", ROOT)\n",
+    "print(\"Device:\", DEVICE)\n",
+    "assert DATA.exists(), f\"Dataset folder not found: {DATA}. Run from the project root and add the dataset.\"\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2bb68d59",
+   "metadata": {},
+   "source": [
+    "## 1. Load dataset metadata\n",
+    "\n",
+    "`ImageFolder` infers labels from subfolder names. This keeps labels consistent with the directory structure. We inspect counts before training because class imbalance can affect metrics."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c9136a38",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from collections import Counter\n",
+    "from torchvision.datasets import ImageFolder\n",
+    "splits = {}\n",
+    "for split in [\"train\", \"val\", \"test\"]:\n",
+    "    ds = ImageFolder(DATA / split)\n",
+    "    splits[split] = ds\n",
+    "    print(f\"\\\\n{split}: {len(ds)} images\")\n",
+    "    print(dict(Counter(ds.targets)))\n",
+    "print(\"Class order:\", splits[\"train\"].classes)\n",
+    "for split, ds in splits.items():\n",
+    "    assert ds.classes == splits[\"train\"].classes, f\"Class order mismatch in {split}\"\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "755a79d9",
+   "metadata": {},
+   "source": [
+    "## 2. Visualise class distribution\n",
+    "\n",
+    "A bar chart reveals whether some classes are represented much more often than others. It does not by itself prove the model will be biased, but it helps interpret per-class recall."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "bb70299c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "counts = {s: [splits[s].targets.count(i) for i in range(len(splits[s].classes))] for s in splits}\n",
+    "x = range(len(splits[\"train\"].classes))\n",
+    "for s, vals in counts.items():\n",
+    "    plt.plot(list(x), vals, marker=\"o\", label=s)\n",
+    "plt.xticks(list(x), splits[\"train\"].classes, rotation=35, ha=\"right\")\n",
+    "plt.ylabel(\"Number of images\"); plt.title(\"Images per class and split\"); plt.legend(); plt.tight_layout(); plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "523f12a9",
+   "metadata": {},
+   "source": [
+    "## 3. Interpretation\n",
+    "\n",
+    "Write down any imbalance, unusual image conditions, and whether train/validation/test class counts look plausible. The recorded split sizes for this project are 2,378 / 792 / 795. A duplicate or near-duplicate audit is still required before claiming fully independent generalisation."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

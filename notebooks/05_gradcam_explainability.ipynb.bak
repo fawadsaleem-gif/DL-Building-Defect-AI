@@ -1,0 +1,149 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "53b145b4",
+   "metadata": {},
+   "source": [
+    "# Building Defect AI — Notebook workflow\n",
+    "\n",
+    "Run from the repository root. Expected data layout: `dataset/BD3_split/{train,val,test}/<class_name>/...`.\n",
+    "\n",
+    "**Task:** classify images into the seven BD3 labels. This notebook records the method, why it is used, the result and its interpretation. Do not treat model predictions as professional inspection findings."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "730acdea",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from pathlib import Path\n",
+    "import torch\n",
+    "from torchvision import datasets, models\n",
+    "ROOT = Path.cwd()\n",
+    "DATA = ROOT / \"dataset\" / \"BD3_split\"\n",
+    "DEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(\"Project:\", ROOT)\n",
+    "print(\"Device:\", DEVICE)\n",
+    "assert DATA.exists(), f\"Dataset folder not found: {DATA}. Run from the project root and add the dataset.\"\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2abf89d9",
+   "metadata": {},
+   "source": [
+    "## 1. Grad-CAM: what and why?\n",
+    "\n",
+    "Grad-CAM uses the gradient of a selected class score with respect to convolutional feature maps. Averaged gradients weight the feature maps, and ReLU keeps positive contributions. The heatmap is a qualitative indication of image regions that influenced the model's score—not a defect segmentation, severity estimate or proof of causal reasoning."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0a3acba2",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "import numpy as np\n",
+    "from PIL import Image\n",
+    "CKPT = ROOT / \"models\" / \"building_defect_resnet18_experiment3.pth\"\n",
+    "checkpoint = torch.load(CKPT, map_location=DEVICE, weights_only=True)\n",
+    "class_names = checkpoint[\"class_names\"]\n",
+    "model = models.resnet18(weights=None)\n",
+    "model.fc = nn.Linear(model.fc.in_features, checkpoint[\"num_classes\"])\n",
+    "model.load_state_dict(checkpoint[\"model_state_dict\"]); model.to(DEVICE).eval()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "e4e93218",
+   "metadata": {},
+   "source": [
+    "## 2. Generate a heatmap for one test image\n",
+    "\n",
+    "Change `IMAGE_PATH` to an image inside the held-out test set. The target layer is the final convolution in ResNet18's Layer4, matching the project's original Grad-CAM implementation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "391565e1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "IMAGE_PATH = next((DATA / \"test\").glob(\"*/*\"))\n",
+    "original = Image.open(IMAGE_PATH).convert(\"RGB\")\n",
+    "transform = models.ResNet18_Weights.DEFAULT.transforms()\n",
+    "x = transform(original).unsqueeze(0).to(DEVICE)\n",
+    "activations, gradients = {}, {}\n",
+    "def capture(module, inputs, output):\n",
+    "    activations[\"features\"] = output\n",
+    "    output.register_hook(lambda grad: gradients.__setitem__(\"features\", grad))\n",
+    "handle = model.layer4[-1].conv2.register_forward_hook(capture)\n",
+    "model.zero_grad(set_to_none=True)\n",
+    "logits = model(x)\n",
+    "idx = int(logits.argmax(1).item())\n",
+    "logits[0, idx].backward()\n",
+    "weights_cam = gradients[\"features\"].mean(dim=(2,3), keepdim=True)\n",
+    "cam = F.relu((weights_cam * activations[\"features\"]).sum(dim=1, keepdim=True))\n",
+    "cam = F.interpolate(cam, size=(224,224), mode=\"bilinear\", align_corners=False)[0,0].detach().cpu().numpy()\n",
+    "cam = (cam-cam.min())/(cam.max()-cam.min()+1e-8)\n",
+    "handle.remove()\n",
+    "print(\"Image:\", IMAGE_PATH, \"| actual:\", IMAGE_PATH.parent.name, \"| prediction:\", class_names[idx],\n",
+    "      \"| confidence:\", f\"{torch.softmax(logits,1)[0,idx].item():.2%}\")\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "c98fb337",
+   "metadata": {},
+   "source": [
+    "## 3. Visualise and interpret cautiously"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "8410b814",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import matplotlib.pyplot as plt\n",
+    "plt.figure(figsize=(12,4))\n",
+    "plt.subplot(1,3,1); plt.imshow(original); plt.title(\"Original\"); plt.axis(\"off\")\n",
+    "plt.subplot(1,3,2); plt.imshow(cam, cmap=\"jet\"); plt.title(\"Grad-CAM\"); plt.axis(\"off\")\n",
+    "plt.subplot(1,3,3); plt.imshow(original.resize((224,224))); plt.imshow(cam, cmap=\"jet\", alpha=.4); plt.title(\"Overlay\"); plt.axis(\"off\")\n",
+    "plt.tight_layout(); plt.show()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "7c5479d9",
+   "metadata": {},
+   "source": [
+    "## 4. Interpretation prompts\n",
+    "\n",
+    "- Does the highlighted region overlap the visible surface condition?\n",
+    "- Is the model attending to a contextual cue such as ground, shadow, vegetation or an image border?\n",
+    "- Would the prediction remain plausible under different lighting, distance or background?\n",
+    "- What additional data or controlled testing would be needed before using this system in practice?\n",
+    "\n",
+    "A Grad-CAM map is an explanation aid only. A qualified building professional must make inspection decisions."
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

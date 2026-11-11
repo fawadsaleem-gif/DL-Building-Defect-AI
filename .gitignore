@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+*.log
+
+# Environments and secrets
+.venv/
+venv/
+.env
+*.env
+
+# Local datasets
+dataset/BD3_original_dataset/
+dataset/BD3_split/
+dataset/BFD-ML-4K/
+data/
+
+# Model checkpoints — hosted separately
+models/*.pth
+models/*.pt
+
+# Temporary outputs
+outputs/reports/*.html
+
+# OS files
+.DS_Store
+Thumbs.db
